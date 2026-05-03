@@ -4,24 +4,32 @@ from __future__ import annotations
 
 import os
 import time
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv optional
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 from starlette.responses import JSONResponse
 
-from src.engine import LLMFallback, StateStore, VeraComposer, make_ack_id, utc_now_iso
+from src.engine import StateStore, VeraComposer, make_ack_id, utc_now_iso
+from src.llm import LLMClient
 
 TEAM_NAME = os.getenv("TEAM_NAME", "Team VeraEngine")
-TEAM_MEMBERS = os.getenv("TEAM_MEMBERS", "Candidate").split(",")
-MODEL_NAME = os.getenv("MODEL_NAME", "deterministic+optional-openai-fallback")
+TEAM_MEMBERS = os.getenv("TEAM_MEMBERS", "Harsh Karn").split(",")
+MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.0-flash-with-deterministic-fallback")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "candidate@example.com")
-VERSION = os.getenv("BOT_VERSION", "1.0.0")
+VERSION = os.getenv("BOT_VERSION", "2.0.0")
 APP_STARTED = time.time()
 
 app = FastAPI(title="Vera Message Engine")
 store = StateStore()
-composer = VeraComposer(store=store, llm_fallback=LLMFallback())
+llm = LLMClient()
+composer = VeraComposer(store=store, llm=llm)
 
 
 class ContextPushBody(BaseModel):
@@ -64,7 +72,9 @@ async def metadata() -> dict[str, Any]:
         "team_name": TEAM_NAME,
         "team_members": [m.strip() for m in TEAM_MEMBERS if m.strip()],
         "model": MODEL_NAME,
-        "approach": "deterministic strategy router with replay guards and optional temperature-0 LLM fallback",
+        "approach": "LLM-powered composer (Mistral/OpenAI) with category-voice prompts, "
+                    "compulsion levers, Hindi-English code-mix, and deterministic fallback. "
+                    "Replay-hardened for auto-reply, intent transition, and hostile handling.",
         "contact_email": CONTACT_EMAIL,
         "version": VERSION,
         "submitted_at": utc_now_iso(),
@@ -75,25 +85,15 @@ async def metadata() -> dict[str, Any]:
 async def push_context(body: ContextPushBody) -> dict[str, Any]:
     """Receive context update with idempotent version semantics."""
     accepted, current_version = store.upsert_context(
-        scope=body.scope,
-        context_id=body.context_id,
-        version=body.version,
-        payload=body.payload,
+        scope=body.scope, context_id=body.context_id,
+        version=body.version, payload=body.payload,
     )
     if not accepted:
         return JSONResponse(
             status_code=409,
-            content={
-                "accepted": False,
-                "reason": "stale_version",
-                "current_version": current_version,
-            },
+            content={"accepted": False, "reason": "stale_version", "current_version": current_version},
         )
-    return {
-        "accepted": True,
-        "ack_id": make_ack_id(body.context_id, body.version),
-        "stored_at": utc_now_iso(),
-    }
+    return {"accepted": True, "ack_id": make_ack_id(body.context_id, body.version), "stored_at": utc_now_iso()}
 
 
 @app.post("/v1/tick")
@@ -111,21 +111,24 @@ async def tick(body: TickBody) -> dict[str, Any]:
 async def reply(body: ReplyBody) -> dict[str, Any]:
     """Process simulated merchant/customer reply."""
     decision = composer.handle_reply(
-        conversation_id=body.conversation_id,
-        merchant_id=body.merchant_id,
-        customer_id=body.customer_id,
-        message=body.message,
+        conversation_id=body.conversation_id, merchant_id=body.merchant_id,
+        customer_id=body.customer_id, message=body.message,
     )
     if decision.get("action") == "send" and not decision.get("body"):
-        return JSONResponse(
-            status_code=400,
-            content={"accepted": False, "reason": "invalid_send_body"},
-        )
+        return JSONResponse(status_code=400, content={"accepted": False, "reason": "invalid_send_body"})
     return decision
+
+
+@app.post("/v1/teardown")
+async def teardown() -> dict[str, Any]:
+    """Wipe state at end of test (privacy compliance)."""
+    store.contexts.clear()
+    store.conversations.clear()
+    store.sent_suppressions.clear()
+    store.opted_out_merchants.clear()
+    return {"status": "wiped"}
 
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run(app, host="0.0.0.0", port=8080)
-
