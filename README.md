@@ -1,4 +1,4 @@
-# Vera Message Engine — magicpin AI Challenge
+#  Message Engine
 
 ## Approach
 
